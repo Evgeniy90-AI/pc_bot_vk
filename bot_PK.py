@@ -14,7 +14,7 @@ import signal
 from datetime import date
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict, Optional, Tuple
-from queue import Queue
+from queue import Queue, Full
 
 from dotenv import load_dotenv
 import vk_api
@@ -363,8 +363,9 @@ def find_cached_answer(budget: int, used_only: bool, query_hash: str = "") -> Op
     return None
 
 def save_answer_to_cache(budget: int, used_only: bool, answer: str, query_hash: str = ""):
+    global ANSWERS_CACHE
     if used_only:
-        return  # не сохраняем б/у сборки в кэш
+        return
     key = f"{'used' if used_only else 'new'}_{budget}"
     if query_hash:
         key += f"_{query_hash}"
@@ -421,8 +422,10 @@ def can_call_api() -> bool:
 
 def safe_gemini_call(messages, temp=0.3, max_tokens=1500):
     if openrouter_client is None:
+        logger.error("OpenRouter клиент не инициализирован")
         return "⚠️ Сервис временно недоступен"
     if not can_call_api():
+        logger.warning("Достигнут лимит запросов")
         return "⚠️ Слишком много запросов. Подождите."
     for attempt in range(API_RETRIES):
         try:
@@ -434,9 +437,11 @@ def safe_gemini_call(messages, temp=0.3, max_tokens=1500):
                 "timeout": API_TIMEOUT
             }
             resp = openrouter_client.chat.completions.create(**kwargs)
-            return resp.choices[0].message.content.strip()
+            answer = resp.choices[0].message.content.strip()
+            logger.info(f"Gemini успешно ответил, длина ответа: {len(answer)}")
+            return answer
         except Exception as e:
-            logger.warning(f"Попытка {attempt+1}/{API_RETRIES} ошибка: {e}")
+            logger.warning(f"Gemini попытка {attempt+1} ошибка: {e}")
             if attempt == API_RETRIES - 1:
                 return None
             time.sleep(API_RETRY_DELAY * (2 ** attempt))
@@ -444,6 +449,7 @@ def safe_gemini_call(messages, temp=0.3, max_tokens=1500):
 
 def safe_deepseek_call(question: str, max_tokens: int = 2500) -> Optional[str]:
     if deepseek_client is None:
+        logger.error("DeepSeek клиент не инициализирован")
         return "⚠️ Сервис временно недоступен"
     if not can_call_api():
         return "⚠️ Слишком много запросов. Подождите."
@@ -456,9 +462,11 @@ def safe_deepseek_call(question: str, max_tokens: int = 2500) -> Optional[str]:
                 max_tokens=max_tokens,
                 timeout=DEEPSEEK_TIMEOUT
             )
-            return resp.choices[0].message.content.strip()
+            answer = resp.choices[0].message.content.strip()
+            logger.info(f"DeepSeek успешно ответил, длина: {len(answer)}")
+            return answer
         except Exception as e:
-            logger.warning(f"Попытка {attempt+1}/{API_RETRIES} ошибка: {e}")
+            logger.warning(f"DeepSeek попытка {attempt+1} ошибка: {e}")
             if attempt == API_RETRIES - 1:
                 return None
             time.sleep(API_RETRY_DELAY * (2 ** attempt))
@@ -646,22 +654,29 @@ def handle_build_command(vk, uid, msg, admin) -> bool:
     send_typing(vk, uid)
 
     def task():
-        if used_only:
-            ans = ask_gemini_used(budget)
-        elif budget >= PREMIUM_BUDGET_THRESHOLD:
-            ans = ask_gemini_premium(budget)
-        else:
-            if budget <= 60000:
+        logger.info(f"Начало обработки задачи для бюджета {budget}")
+        try:
+            if used_only:
                 ans = ask_gemini_used(budget)
+            elif budget >= PREMIUM_BUDGET_THRESHOLD:
+                ans = ask_gemini_premium(budget)
             else:
-                build = get_closest_build_to_budget(budget)
-                if build:
-                    ans = ask_gemini_build(build, budget)
-                else:
+                if budget <= 60000:
                     ans = ask_gemini_used(budget)
-        if ans and not ans.startswith("⚠️"):
-            save_answer_to_cache(budget, used_only, ans, qhash)
-        send_msg(vk, uid, ans)
+                else:
+                    build = get_closest_build_to_budget(budget)
+                    if build:
+                        ans = ask_gemini_build(build, budget)
+                    else:
+                        ans = ask_gemini_used(budget)
+            if ans and not ans.startswith("⚠️"):
+                save_answer_to_cache(budget, used_only, ans, qhash)
+            logger.info(f"Ответ получен, длина {len(ans)}. Отправляем пользователю...")
+            send_msg(vk, uid, ans)
+            logger.info("Сообщение отправлено")
+        except Exception as e:
+            logger.error(f"Ошибка в task: {e}", exc_info=True)
+            send_msg(vk, uid, "⚠️ Произошла ошибка. Попробуйте позже.")
     ai_executor.submit(task)
     return True
 
@@ -682,15 +697,23 @@ def vk_send_with_retry(vk, user_id, text, retries=2):
 def send_worker(vk_session):
     vk = vk_session.get_api()
     while True:
-        uid, text = send_queue.get()
-        vk_send_with_retry(vk, uid, text)
-        send_queue.task_done()
+        try:
+            uid, text = send_queue.get(timeout=1)
+            logger.info(f"send_worker: отправка сообщения {uid}, длина {len(text)}")
+            vk_send_with_retry(vk, uid, text)
+            send_queue.task_done()
+        except Exception as e:
+            if send_queue.empty():
+                continue
+            logger.error(f"Ошибка в send_worker: {e}")
 
 def send_msg(vk, user_id, text):
     try:
         send_queue.put_nowait((user_id, text))
-    except Exception as e:
-        logger.error(f"Очередь переполнена: {e}")
+    except Full:
+        logger.error(f"Очередь переполнена, сообщение для {user_id} потеряно")
+        # fallback: отправить напрямую
+        vk_send_with_retry(vk, user_id, text)
 
 def send_typing(vk, user_id):
     try:
@@ -798,7 +821,7 @@ def handle_private(vk, community_owner_id, group_id, admin_ids, event):
                 return
             send_typing(vk, uid)
             def admin_task():
-                answer = safe_deepseek_call(question, max_tokens=1500)
+                answer = safe_deepseek_call(question, max_tokens=2500)
                 if not answer:
                     answer = "⚠️ Не удалось получить ответ. Попробуйте позже."
                 if len(answer) > DEEPSEEK_MAX_ANSWER_LEN:
