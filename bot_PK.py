@@ -52,7 +52,7 @@ API_RETRY_DELAY = 1.0
 # DeepSeek настройки
 DEEPSEEK_DAILY_LIMIT = 3
 DEEPSEEK_MAX_QUESTION_LEN = 100
-DEEPSEEK_MAX_ANSWER_LEN = 1500
+DEEPSEEK_MAX_ANSWER_LEN = 4000
 DEEPSEEK_RATE_LIMIT = 1
 DEEPSEEK_RATE_WINDOW = 60
 FREE_DS_ATTEMPTS = 3
@@ -152,13 +152,12 @@ def has_user_reposted(vk, user_id, force_refresh=False) -> bool:
         return cached
 
 # ------------------------------
-# Лимиты для основных команд (исправленная)
+# Лимиты для основных команд
 # ------------------------------
 def try_consume_usage(user_id: int) -> bool:
     today = date.today().isoformat()
     with user_daily_usage_lock:
         usage = user_daily_usage.get(user_id)
-        # Если нет записи или дата не сегодня – создаём новую
         if not usage or usage.get("date") != today:
             user_daily_usage[user_id] = {
                 "date": today,
@@ -170,7 +169,6 @@ def try_consume_usage(user_id: int) -> bool:
             }
             safe_json_dump(user_daily_usage, USAGE_FILE)
             return True
-        # Если дата сегодня, но нет поля count (старая запись)
         if "count" not in usage:
             usage["count"] = 0
         if usage["count"] < DAILY_LIMIT:
@@ -180,7 +178,7 @@ def try_consume_usage(user_id: int) -> bool:
         return False
 
 # ------------------------------
-# Проверка и списание DeepSeek (исправленная)
+# Проверка и списание DeepSeek
 # ------------------------------
 def is_deepseek_available(vk, group_id, user_id, force_refresh=False) -> Tuple[bool, str]:
     if not is_subscribed(vk, group_id, user_id):
@@ -257,7 +255,6 @@ def load_daily_usage():
         try:
             with open(USAGE_FILE, "r", encoding="utf-8") as f:
                 user_daily_usage = json.load(f)
-            # Нормализация данных – добавляем отсутствующие ключи
             for uid, data in user_daily_usage.items():
                 if "ds_count" not in data:
                     data["ds_count"] = 0
@@ -363,20 +360,11 @@ def find_cached_answer(budget: int, used_only: bool, query_hash: str = "") -> Op
         with ANSWERS_CACHE_LOCK:
             if exact_key in ANSWERS_CACHE:
                 return ANSWERS_CACHE[exact_key]["answer"]
-    with ANSWERS_CACHE_LOCK:
-        for key, value in ANSWERS_CACHE.items():
-            if not key.startswith(key_prefix):
-                continue
-            try:
-                cached_budget = int(key.split("_")[1])
-                if abs(cached_budget - budget) <= CACHE_BUDGET_TOLERANCE:
-                    return value["answer"]
-            except:
-                continue
     return None
 
 def save_answer_to_cache(budget: int, used_only: bool, answer: str, query_hash: str = ""):
-    global ANSWERS_CACHE
+    if used_only:
+        return  # не сохраняем б/у сборки в кэш
     key = f"{'used' if used_only else 'new'}_{budget}"
     if query_hash:
         key += f"_{query_hash}"
@@ -454,7 +442,7 @@ def safe_gemini_call(messages, temp=0.3, max_tokens=1500):
             time.sleep(API_RETRY_DELAY * (2 ** attempt))
     return None
 
-def safe_deepseek_call(question: str, max_tokens: int = 1500) -> Optional[str]:
+def safe_deepseek_call(question: str, max_tokens: int = 2500) -> Optional[str]:
     if deepseek_client is None:
         return "⚠️ Сервис временно недоступен"
     if not can_call_api():
@@ -553,30 +541,26 @@ def normalize_query(text: str) -> str:
 # ------------------------------
 # AI функции для сборок
 # ------------------------------
-def ask_gemini_analyze_custom(components_text: str, budget: int) -> str:
-    prompt = f"""
-Пользователь хочет собрать ПК за {budget}₽ со следующими компонентами:
-{components_text}
+def get_used_budget_category(budget: int) -> str:
+    if budget <= 25000:
+        return "очень бюджетная (до 25000)"
+    elif budget <= 35000:
+        return "начального уровня (25000-35000)"
+    elif budget <= 45000:
+        return "среднего уровня (35000-45000)"
+    elif budget <= 55000:
+        return "хорошего уровня (45000-55000)"
+    else:
+        return "почти топ (55000-60000)"
 
-ВАЖНО:
-- НЕ ИСПРАВЛЯЙ названия комплектующих.
-- НЕ ПИШИ, что чего-то "не существует". Даже если модель тебе незнакома, просто оцени её как игровой компонент.
-- Если сомневаешься в названии, всё равно дай прогноз, основываясь на логике.
-- ОТВЕЧАЙ ТОЛЬКО ПО ЗАДАЧЕ: компоненты, FPS, итог.
-- НЕ ДОБАВЛЯЙ лишних комментариев типа "устарела", "слабое звено" — только суть.
-
-Коротко, без лишнего.
-
-Напиши:
-1. Компоненты (кратко, как есть)
-2. Прогноз FPS в 5 играх (1080p, высокие/ультра настройки)
-3. Итог (достаточно ли этой сборки для комфортной игры)
-"""
+def ask_gemini_used(budget: int) -> str:
+    category = get_used_budget_category(budget)
+    prompt = f"Подбери б/у сборку для игр за {budget}₽ (категория: {category}). Укажи CPU, GPU, RAM, SSD, БП. Дай прогноз FPS в 5 играх (1080p). Кратко, без советов. Не пиши 'не существует'."
     resp = safe_gemini_call([
-        {"role": "system", "content": "Ты не споришь с пользователем. Не исправляешь названия. Не говоришь 'не существует'. Выполняешь задачу."},
+        {"role": "system", "content": "Кратко, только суть. Не исправляй названия, не спорь. Подбирай разные компоненты в зависимости от бюджета."},
         {"role": "user", "content": prompt}
-    ], temp=0.4, max_tokens=800)
-    return resp if resp else "Не удалось проанализировать сборку."
+    ], temp=0.5, max_tokens=700)
+    return resp if resp else "Ошибка"
 
 def ask_gemini_build(build: Dict, budget: int) -> str:
     prompt = f"""
@@ -601,13 +585,30 @@ def ask_gemini_build(build: Dict, budget: int) -> str:
     ], temp=0.4, max_tokens=800)
     return resp if resp else "Ошибка при анализе сборки."
 
-def ask_gemini_used(budget: int) -> str:
-    prompt = f"Подбери б/у сборку за {budget}₽. CPU, GPU, RAM, SSD, БП. Прогноз FPS в 5 играх (1080p). Кратко, без советов. Не пиши 'не существует'."
+def ask_gemini_analyze_custom(components_text: str, budget: int) -> str:
+    prompt = f"""
+Пользователь хочет собрать ПК за {budget}₽ со следующими компонентами:
+{components_text}
+
+ВАЖНО:
+- НЕ ИСПРАВЛЯЙ названия комплектующих.
+- НЕ ПИШИ, что чего-то "не существует". Даже если модель тебе незнакома, просто оцени её как игровой компонент.
+- Если сомневаешься в названии, всё равно дай прогноз, основываясь на логике.
+- ОТВЕЧАЙ ТОЛЬКО ПО ЗАДАЧЕ: компоненты, FPS, итог.
+- НЕ ДОБАВЛЯЙ лишних комментариев типа "устарела", "слабое звено" — только суть.
+
+Коротко, без лишнего.
+
+Напиши:
+1. Компоненты (кратко, как есть)
+2. Прогноз FPS в 5 играх (1080p, высокие/ультра настройки)
+3. Итог (достаточно ли этой сборки для комфортной игры)
+"""
     resp = safe_gemini_call([
-        {"role": "system", "content": "Кратко, только суть. Не исправляй названия, не спорь."},
+        {"role": "system", "content": "Ты не споришь с пользователем. Не исправляешь названия. Не говоришь 'не существует'. Выполняешь задачу."},
         {"role": "user", "content": prompt}
-    ], temp=0.4, max_tokens=600)
-    return resp if resp else "Ошибка"
+    ], temp=0.4, max_tokens=800)
+    return resp if resp else "Не удалось проанализировать сборку."
 
 def ask_gemini_premium(budget: int) -> str:
     prompt = f"Подбери топовую сборку за {budget}₽. Компоненты и прогноз FPS в 5 играх (1440p, ультра). Кратко."
@@ -644,9 +645,6 @@ def handle_build_command(vk, uid, msg, admin) -> bool:
         return True
     send_typing(vk, uid)
 
-    component_keywords = ['rtx', 'gtx', 'rx', 'radeon', 'geforce', 'ryzen', 'intel', 'core', 'amd', 'ddr', 'ssd', 'hdd', 'nvme']
-    has_components = any(kw in query.lower() for kw in component_keywords)
-
     def task():
         if used_only:
             ans = ask_gemini_used(budget)
@@ -654,18 +652,13 @@ def handle_build_command(vk, uid, msg, admin) -> bool:
             ans = ask_gemini_premium(budget)
         else:
             if budget <= 60000:
-                warning = "⚠️ Новые комплектующие невыгодны. Рекомендую б/у:\n\n"
-                used_ans = ask_gemini_used(budget)
-                ans = warning + used_ans
+                ans = ask_gemini_used(budget)
             else:
-                if has_components:
-                    ans = ask_gemini_analyze_custom(query, budget)
+                build = get_closest_build_to_budget(budget)
+                if build:
+                    ans = ask_gemini_build(build, budget)
                 else:
-                    build = get_closest_build_to_budget(budget)
-                    if build:
-                        ans = ask_gemini_build(build, budget)
-                    else:
-                        ans = ask_gemini_used(budget)
+                    ans = ask_gemini_used(budget)
         if ans and not ans.startswith("⚠️"):
             save_answer_to_cache(budget, used_only, ans, qhash)
         send_msg(vk, uid, ans)
@@ -805,7 +798,7 @@ def handle_private(vk, community_owner_id, group_id, admin_ids, event):
                 return
             send_typing(vk, uid)
             def admin_task():
-                answer = safe_deepseek_call(question, max_tokens=DEEPSEEK_MAX_ANSWER_LEN)
+                answer = safe_deepseek_call(question, max_tokens=1500)
                 if not answer:
                     answer = "⚠️ Не удалось получить ответ. Попробуйте позже."
                 if len(answer) > DEEPSEEK_MAX_ANSWER_LEN:
@@ -835,7 +828,7 @@ def handle_private(vk, community_owner_id, group_id, admin_ids, event):
             return
         send_typing(vk, uid)
         def deepseek_task():
-            answer = safe_deepseek_call(question, max_tokens=DEEPSEEK_MAX_ANSWER_LEN)
+            answer = safe_deepseek_call(question, max_tokens=2500)
             if not answer:
                 answer = "⚠️ Не удалось получить ответ. Попробуйте позже."
             if len(answer) > DEEPSEEK_MAX_ANSWER_LEN:
