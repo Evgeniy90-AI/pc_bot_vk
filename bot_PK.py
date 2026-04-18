@@ -505,14 +505,16 @@ def parse_price_file() -> List[Dict]:
     logger.info("Загружено %d сборок", len(builds))
     return builds
 
-def get_closest_build_to_budget(budget: int) -> Optional[Dict]:
+def get_closest_build_with_tolerance(budget: int, tolerance=0.1) -> Optional[Dict]:
+    """Ищет сборку, цена которой не превышает budget * (1 + tolerance)."""
     if not READY_BUILDS:
         return None
-    eligible = [b for b in READY_BUILDS if b["price"] <= budget]
+    max_price = int(budget * (1 + tolerance))
+    eligible = [b for b in READY_BUILDS if b["price"] <= max_price]
     if eligible:
-        eligible.sort(key=lambda x: x["price"], reverse=True)
+        eligible.sort(key=lambda x: abs(x["price"] - budget))
         return eligible[0]
-    return min(READY_BUILDS, key=lambda x: x["price"])
+    return None
 
 def extract_budget_from_text(text: str) -> Optional[int]:
     text_lower = text.lower()
@@ -626,6 +628,16 @@ def ask_gemini_premium(budget: int) -> str:
     ], temp=0.4, max_tokens=600)
     return resp if resp else "Ошибка"
 
+def ask_gemini_new_build(budget: int) -> str:
+    prompt = f"""
+Подбери новую игровую сборку ПК за {budget}₽. Обязательно включи дискретную видеокарту, 16 ГБ ОЗУ (или больше), SSD. Укажи CPU, GPU, материнскую плату, RAM, SSD, БП. Дай прогноз FPS в 5 играх (1080p, высокие настройки). Кратко, без советов.
+"""
+    resp = safe_gemini_call([
+        {"role": "system", "content": "Ты эксперт по сборке ПК. Отвечай кратко, только компоненты и FPS. Не пиши 'не существует'."},
+        {"role": "user", "content": prompt}
+    ], temp=0.4, max_tokens=800)
+    return resp if resp else "Ошибка подбора сборки"
+
 # ------------------------------
 # Команда !сравни (отключена)
 # ------------------------------
@@ -664,16 +676,19 @@ def handle_build_command(vk, uid, msg, admin) -> bool:
                 if budget <= 60000:
                     ans = ask_gemini_used(budget)
                 else:
-                    build = get_closest_build_to_budget(budget)
+                    # Ищем готовую сборку с возможным превышением до 10%
+                    build = get_closest_build_with_tolerance(budget, tolerance=0.1)
                     if build:
-                        ans = ask_gemini_build(build, budget)
+                        if build["price"] > budget:
+                            warning = f"⚠️ Бюджет {budget}₽, но найдена сборка за {build['price']}₽.\n\n"
+                            ans = warning + ask_gemini_build(build, budget)
+                        else:
+                            ans = ask_gemini_build(build, budget)
                     else:
-                        ans = ask_gemini_used(budget)
+                        ans = ask_gemini_new_build(budget)
             if ans and not ans.startswith("⚠️"):
                 save_answer_to_cache(budget, used_only, ans, qhash)
-            logger.info(f"Ответ получен, длина {len(ans)}. Отправляем пользователю...")
             send_msg(vk, uid, ans)
-            logger.info("Сообщение отправлено")
         except Exception as e:
             logger.error(f"Ошибка в task: {e}", exc_info=True)
             send_msg(vk, uid, "⚠️ Произошла ошибка. Попробуйте позже.")
@@ -712,7 +727,6 @@ def send_msg(vk, user_id, text):
         send_queue.put_nowait((user_id, text))
     except Full:
         logger.error(f"Очередь переполнена, сообщение для {user_id} потеряно")
-        # fallback: отправить напрямую
         vk_send_with_retry(vk, user_id, text)
 
 def send_typing(vk, user_id):
