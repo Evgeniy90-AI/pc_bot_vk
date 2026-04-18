@@ -152,31 +152,35 @@ def has_user_reposted(vk, user_id, force_refresh=False) -> bool:
         return cached
 
 # ------------------------------
-# Лимиты для основных команд
+# Лимиты для основных команд (исправленная)
 # ------------------------------
 def try_consume_usage(user_id: int) -> bool:
     today = date.today().isoformat()
     with user_daily_usage_lock:
-        usage = user_daily_usage.get(user_id, {})
-        if usage.get("date") != today:
+        usage = user_daily_usage.get(user_id)
+        # Если нет записи или дата не сегодня – создаём новую
+        if not usage or usage.get("date") != today:
             user_daily_usage[user_id] = {
                 "date": today,
                 "count": 1,
                 "ds_count": 0,
                 "repost_date": "",
-                "free_ds_used": usage.get("free_ds_used", 0),
-                "first_ds_date": usage.get("first_ds_date", "")
+                "free_ds_used": usage.get("free_ds_used", 0) if usage else 0,
+                "first_ds_date": usage.get("first_ds_date", "") if usage else ""
             }
             safe_json_dump(user_daily_usage, USAGE_FILE)
             return True
+        # Если дата сегодня, но нет поля count (старая запись)
+        if "count" not in usage:
+            usage["count"] = 0
         if usage["count"] < DAILY_LIMIT:
-            user_daily_usage[user_id]["count"] += 1
+            usage["count"] += 1
             safe_json_dump(user_daily_usage, USAGE_FILE)
             return True
         return False
 
 # ------------------------------
-# Проверка и списание DeepSeek
+# Проверка и списание DeepSeek (исправленная)
 # ------------------------------
 def is_deepseek_available(vk, group_id, user_id, force_refresh=False) -> Tuple[bool, str]:
     if not is_subscribed(vk, group_id, user_id):
@@ -184,13 +188,15 @@ def is_deepseek_available(vk, group_id, user_id, force_refresh=False) -> Tuple[b
 
     today = date.today().isoformat()
     with user_daily_usage_lock:
-        usage = user_daily_usage.get(user_id, {})
+        usage = user_daily_usage.setdefault(user_id, {})
         first_ds_date = usage.get("first_ds_date", "")
         free_used = usage.get("free_ds_used", 0)
 
         if not first_ds_date:
             usage["first_ds_date"] = today
-            user_daily_usage[user_id] = usage
+            usage.setdefault("ds_count", 0)
+            usage.setdefault("count", 0)
+            usage.setdefault("repost_date", "")
             safe_json_dump(user_daily_usage, USAGE_FILE)
             first_ds_date = today
 
@@ -217,7 +223,7 @@ def try_consume_deepseek(vk, group_id, user_id, force_refresh=False) -> Tuple[bo
         return False, msg
 
     with user_daily_usage_lock:
-        usage = user_daily_usage.get(user_id, {})
+        usage = user_daily_usage.setdefault(user_id, {})
         today = date.today().isoformat()
         first_ds_date = usage.get("first_ds_date", "")
         free_used = usage.get("free_ds_used", 0)
@@ -226,22 +232,20 @@ def try_consume_deepseek(vk, group_id, user_id, force_refresh=False) -> Tuple[bo
             usage["free_ds_used"] = free_used + 1
             if "date" not in usage:
                 usage["date"] = today
-            user_daily_usage[user_id] = usage
             safe_json_dump(user_daily_usage, USAGE_FILE)
             return True, ""
 
         if usage.get("date") != today:
-            usage = {
+            usage.update({
                 "date": today,
                 "count": usage.get("count", 0),
                 "ds_count": 1,
                 "repost_date": today,
                 "free_ds_used": free_used,
                 "first_ds_date": first_ds_date
-            }
+            })
         else:
             usage["ds_count"] = usage.get("ds_count", 0) + 1
-        user_daily_usage[user_id] = usage
         safe_json_dump(user_daily_usage, USAGE_FILE)
         return True, ""
 
@@ -253,6 +257,7 @@ def load_daily_usage():
         try:
             with open(USAGE_FILE, "r", encoding="utf-8") as f:
                 user_daily_usage = json.load(f)
+            # Нормализация данных – добавляем отсутствующие ключи
             for uid, data in user_daily_usage.items():
                 if "ds_count" not in data:
                     data["ds_count"] = 0
@@ -262,6 +267,8 @@ def load_daily_usage():
                     data["free_ds_used"] = 0
                 if "first_ds_date" not in data:
                     data["first_ds_date"] = ""
+                if "count" not in data:
+                    data["count"] = 0
         except Exception as e:
             logger.warning(f"Не удалось загрузить лимиты: {e}")
 
@@ -544,7 +551,7 @@ def normalize_query(text: str) -> str:
     return re.sub(r'\d+', 'X', text).strip()
 
 # ------------------------------
-# AI функции для сборок (исправленные, без "не существует")
+# AI функции для сборок
 # ------------------------------
 def ask_gemini_analyze_custom(components_text: str, budget: int) -> str:
     prompt = f"""
@@ -554,7 +561,7 @@ def ask_gemini_analyze_custom(components_text: str, budget: int) -> str:
 ВАЖНО:
 - НЕ ИСПРАВЛЯЙ названия комплектующих.
 - НЕ ПИШИ, что чего-то "не существует". Даже если модель тебе незнакома, просто оцени её как игровой компонент.
-- Если сомневаешься в названии, всё равно дай прогноз, основываясь на логике (например, RTX 5060 Ti — это видеокарта уровня выше 5060).
+- Если сомневаешься в названии, всё равно дай прогноз, основываясь на логике.
 - ОТВЕЧАЙ ТОЛЬКО ПО ЗАДАЧЕ: компоненты, FPS, итог.
 - НЕ ДОБАВЛЯЙ лишних комментариев типа "устарела", "слабое звено" — только суть.
 
@@ -637,7 +644,6 @@ def handle_build_command(vk, uid, msg, admin) -> bool:
         return True
     send_typing(vk, uid)
 
-    # Проверяем, перечислил ли пользователь конкретные компоненты
     component_keywords = ['rtx', 'gtx', 'rx', 'radeon', 'geforce', 'ryzen', 'intel', 'core', 'amd', 'ddr', 'ssd', 'hdd', 'nvme']
     has_components = any(kw in query.lower() for kw in component_keywords)
 
