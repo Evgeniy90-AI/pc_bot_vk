@@ -1,0 +1,8 @@
+.env
+__pycache__/
+*.pyc
+venv/
+*.log
+daily_usage.json
+answers_cache.json
+components_cache.json
