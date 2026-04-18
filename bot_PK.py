@@ -563,7 +563,7 @@ def get_used_budget_category(budget: int) -> str:
 
 def ask_gemini_used(budget: int) -> str:
     category = get_used_budget_category(budget)
-    prompt = f"Подбери б/у сборку для игр за {budget}₽ (категория: {category}). Укажи CPU, GPU, RAM, SSD, БП. Дай прогноз FPS в 5 играх (1080p). Кратко, без советов. Не пиши 'не существует'."
+    prompt = f"Подбери б/у сборку для игр за {budget}₽ (категория: {category}). Укажи CPU, материнскую плату, GPU, RAM, SSD, БП. Дай прогноз FPS в 5 играх (1080p). Кратко, без советов. Не пиши 'не существует'."
     resp = safe_gemini_call([
         {"role": "system", "content": "Кратко, только суть. Не исправляй названия, не спорь. Подбирай разные компоненты в зависимости от бюджета."},
         {"role": "user", "content": prompt}
