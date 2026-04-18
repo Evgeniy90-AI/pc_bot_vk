@@ -423,10 +423,10 @@ def can_call_api() -> bool:
 def safe_gemini_call(messages, temp=0.3, max_tokens=1500):
     if openrouter_client is None:
         logger.error("OpenRouter клиент не инициализирован")
-        return "⚠️ Сервис временно недоступен"
+        return "🔄 Сервис временно перегружен, попробуй чуть позже. Приношу извинения за неудобства!"
     if not can_call_api():
         logger.warning("Достигнут лимит запросов")
-        return "⚠️ Слишком много запросов. Подождите."
+        return "⚠️ Слишком много запросов. Подождите немного, пожалуйста."
     for attempt in range(API_RETRIES):
         try:
             kwargs = {
@@ -450,9 +450,9 @@ def safe_gemini_call(messages, temp=0.3, max_tokens=1500):
 def safe_deepseek_call(question: str, max_tokens: int = 2500) -> Optional[str]:
     if deepseek_client is None:
         logger.error("DeepSeek клиент не инициализирован")
-        return "⚠️ Сервис временно недоступен"
+        return "🔄 Сервис временно перегружен, попробуй чуть позже. Приношу извинения за неудобства!"
     if not can_call_api():
-        return "⚠️ Слишком много запросов. Подождите."
+        return "⚠️ Слишком много запросов. Подождите немного, пожалуйста."
     for attempt in range(API_RETRIES):
         try:
             resp = deepseek_client.chat.completions.create(
@@ -620,14 +620,6 @@ def ask_gemini_analyze_custom(components_text: str, budget: int) -> str:
     ], temp=0.4, max_tokens=800)
     return resp if resp else "Не удалось проанализировать сборку."
 
-def ask_gemini_premium(budget: int) -> str:
-    prompt = f"Подбери топовую сборку за {budget}₽. Компоненты и прогноз FPS в 5 играх (1440p, ультра). Кратко."
-    resp = safe_gemini_call([
-        {"role": "system", "content": "Кратко, без лишнего."},
-        {"role": "user", "content": prompt}
-    ], temp=0.4, max_tokens=600)
-    return resp if resp else "Ошибка"
-
 def ask_gemini_new_build(budget: int) -> str:
     prompt = f"""
 Подбери новую игровую сборку ПК за {budget}₽. Обязательно включи дискретную видеокарту, 16 ГБ ОЗУ (или больше), SSD. Укажи CPU, GPU, материнскую плату, RAM, SSD, БП. Дай прогноз FPS в 5 играх (1080p, высокие настройки). Кратко, без советов.
@@ -638,11 +630,19 @@ def ask_gemini_new_build(budget: int) -> str:
     ], temp=0.4, max_tokens=800)
     return resp if resp else "Ошибка подбора сборки"
 
+def ask_gemini_premium(budget: int) -> str:
+    prompt = f"Подбери топовую сборку за {budget}₽. Компоненты и прогноз FPS в 5 играх (1440p, ультра). Кратко."
+    resp = safe_gemini_call([
+        {"role": "system", "content": "Кратко, без лишнего."},
+        {"role": "user", "content": prompt}
+    ], temp=0.4, max_tokens=600)
+    return resp if resp else "Ошибка"
+
 # ------------------------------
 # Команда !сравни (отключена)
 # ------------------------------
 def handle_compare_command(vk, uid, msg, admin) -> bool:
-    send_msg(vk, uid, "Команда временно недоступна. Используйте @ для вопросов.")
+    send_msg(vk, uid, "🔧 Команда !сравни временно недоступна. Но ты всегда можешь задать вопрос через @, я постараюсь помочь!")
     return False
 
 # ------------------------------
@@ -651,11 +651,11 @@ def handle_compare_command(vk, uid, msg, admin) -> bool:
 def handle_build_command(vk, uid, msg, admin) -> bool:
     query = re.sub(r'^!собери пк\s*', '', msg, flags=re.IGNORECASE).strip()
     if not query:
-        send_msg(vk, uid, "Укажите бюджет: !собери пк за 50000")
+        send_msg(vk, uid, "🎯 Укажи бюджет, например: `!собери пк за 50000` или `!собери пк 50к`")
         return False
     budget = extract_budget_from_text(query)
     if not budget:
-        send_msg(vk, uid, "Не удалось определить сумму. Пример: 50к, 50000")
+        send_msg(vk, uid, "🤔 Не могу определить сумму. Попробуй написать, например: `!собери пк за 50000` или `!собери пк 50к`")
         return False
     used_only = wants_used_build(query)
     qhash = hashlib.md5(normalize_query(query).encode()).hexdigest()[:8]
@@ -676,7 +676,6 @@ def handle_build_command(vk, uid, msg, admin) -> bool:
                 if budget <= 60000:
                     ans = ask_gemini_used(budget)
                 else:
-                    # Ищем готовую сборку с возможным превышением до 10%
                     build = get_closest_build_with_tolerance(budget, tolerance=0.1)
                     if build:
                         if build["price"] > budget:
@@ -688,10 +687,13 @@ def handle_build_command(vk, uid, msg, admin) -> bool:
                         ans = ask_gemini_new_build(budget)
             if ans and not ans.startswith("⚠️"):
                 save_answer_to_cache(budget, used_only, ans, qhash)
+            # Добавляем дружелюбную фразу в конец ответа
+            if ans and not ans.startswith("⚠️") and not ans.startswith("Ошибка"):
+                ans += "\n\n✨ Если нужна помощь или хочешь другую сборку, просто напиши снова!"
             send_msg(vk, uid, ans)
         except Exception as e:
             logger.error(f"Ошибка в task: {e}", exc_info=True)
-            send_msg(vk, uid, "⚠️ Произошла ошибка. Попробуйте позже.")
+            send_msg(vk, uid, "🔄 Что-то пошло не так. Попробуй ещё раз или напиши позже. Приношу извинения!")
     ai_executor.submit(task)
     return True
 
@@ -727,6 +729,7 @@ def send_msg(vk, user_id, text):
         send_queue.put_nowait((user_id, text))
     except Full:
         logger.error(f"Очередь переполнена, сообщение для {user_id} потеряно")
+        # fallback: отправить напрямую
         vk_send_with_retry(vk, user_id, text)
 
 def send_typing(vk, user_id):
@@ -743,12 +746,12 @@ def check_comment_spam(user_id: int) -> Tuple[bool, str]:
     with comment_lock:
         last = user_comment_cooldown.get(user_id, 0)
         if now - last < COMMENT_COOLDOWN_SECONDS:
-            return False, f"Подождите {int(COMMENT_COOLDOWN_SECONDS - (now - last))} сек"
+            return False, f"Подожди {int(COMMENT_COOLDOWN_SECONDS - (now - last))} сек, я ещё не остыл 😅"
         today = date.today().isoformat()
         daily = user_comment_daily.get(user_id, {})
         cnt = daily.get(today, 0)
         if cnt >= COMMENT_DAILY_LIMIT:
-            return False, f"Лимит на сегодня {COMMENT_DAILY_LIMIT}"
+            return False, f"Лимит на сегодня {COMMENT_DAILY_LIMIT}, завтра я снова готов помогать!"
         return True, ""
 
 def update_comment_spam(user_id: int):
@@ -828,16 +831,16 @@ def handle_private(vk, community_owner_id, group_id, admin_ids, event):
         if admin:
             question = msg[1:].strip()
             if not question:
-                send_msg(vk, uid, "❓ Напишите вопрос после @. Например: @ рецепт салата")
+                send_msg(vk, uid, "❓ Напиши вопрос после @, например: `@ как выбрать процессор?`")
                 return
             if len(question) > DEEPSEEK_MAX_QUESTION_LEN:
-                send_msg(vk, uid, f"❌ Слишком длинный вопрос. Максимум {DEEPSEEK_MAX_QUESTION_LEN} символов.")
+                send_msg(vk, uid, f"❌ Слишком длинный вопрос. Максимум {DEEPSEEK_MAX_QUESTION_LEN} символов. Попробуй покороче!")
                 return
             send_typing(vk, uid)
             def admin_task():
                 answer = safe_deepseek_call(question, max_tokens=2500)
                 if not answer:
-                    answer = "⚠️ Не удалось получить ответ. Попробуйте позже."
+                    answer = "😔 Не удалось получить ответ. Попробуй ещё раз или позже. Спасибо за понимание!"
                 if len(answer) > DEEPSEEK_MAX_ANSWER_LEN:
                     answer = safe_trim(answer, DEEPSEEK_MAX_ANSWER_LEN)
                 send_msg(vk, uid, answer)
@@ -846,17 +849,17 @@ def handle_private(vk, community_owner_id, group_id, admin_ids, event):
 
         question = msg[1:].strip()
         if not question:
-            send_msg(vk, uid, "❓ Напишите вопрос после @. Например: @ рецепт салата")
+            send_msg(vk, uid, "❓ Напиши вопрос после @, например: `@ как выбрать видеокарту?`")
             return
         if len(question) > DEEPSEEK_MAX_QUESTION_LEN:
-            send_msg(vk, uid, f"❌ Слишком длинный вопрос. Максимум {DEEPSEEK_MAX_QUESTION_LEN} символов.")
+            send_msg(vk, uid, f"❌ Слишком длинный вопрос. Максимум {DEEPSEEK_MAX_QUESTION_LEN} символов. Сократи немного!")
             return
         now = time.time()
         with user_deepseek_lock:
             last = user_deepseek_last_call.get(uid, 0)
             if now - last < DEEPSEEK_RATE_WINDOW:
                 wait = int(DEEPSEEK_RATE_WINDOW - (now - last))
-                send_msg(vk, uid, f"⏳ Подождите {wait} сек перед следующим вопросом.")
+                send_msg(vk, uid, f"⏳ Подожди {wait} сек перед следующим вопросом. Я не робот, мне нужно немного времени 😊")
                 return
             user_deepseek_last_call[uid] = now
         success, err_msg = try_consume_deepseek(vk, group_id, uid, force_refresh=False)
@@ -867,7 +870,7 @@ def handle_private(vk, community_owner_id, group_id, admin_ids, event):
         def deepseek_task():
             answer = safe_deepseek_call(question, max_tokens=2500)
             if not answer:
-                answer = "⚠️ Не удалось получить ответ. Попробуйте позже."
+                answer = "😔 Не удалось получить ответ. Попробуй ещё раз или позже. Спасибо за понимание!"
             if len(answer) > DEEPSEEK_MAX_ANSWER_LEN:
                 answer = safe_trim(answer, DEEPSEEK_MAX_ANSWER_LEN)
             send_msg(vk, uid, answer)
@@ -877,18 +880,24 @@ def handle_private(vk, community_owner_id, group_id, admin_ids, event):
     # Обычные команды
     if norm in ["/start", "/help", "помощь"]:
         help_text = (
-            "👋 ПК-бот.\n\n"
-            "📌 Команды:\n"
-            "!собери пк за 50000 — подбор сборки с прогнозом FPS\n"
-            "@ текст — задать вопрос\n\n"
-            "🎁 Бонусы: репост даёт +2 запроса к основным командам, 10 лайков — +1.\n"
-            "🔓 Вопросы: в первый день 3 запроса бесплатно (без репоста), затем для следующих нужен репост. Каждый день при наличии репоста даётся 3 запроса.\n"
-            "Лимиты обновляются каждый день при наличии активного репоста."
+            "👋 Привет! Я бот-помощник по сборке ПК.\n\n"
+            "📌 **Команды:**\n"
+            "• `!собери пк за 50000` – подберу сборку с прогнозом FPS\n"
+            "• `@ текст вопроса` – задай любой вопрос (например, @ как выбрать блок питания?)\n\n"
+            "🎁 **Бонусы:**\n"
+            "• Репост закреплённого поста → +2 запроса к команде `!собери пк`\n"
+            "• 10 лайков под постами → +1 запрос\n\n"
+            "🔓 **Вопросы через @:**\n"
+            "• Первые 3 вопроса бесплатно (без репоста)\n"
+            "• Далее нужен репост – каждый день 3 вопроса\n"
+            "• 1 вопрос в минуту\n\n"
+            "✨ Лимиты обновляются каждый день при активном репосте.\n"
+            "Удачи в сборке! 🚀"
         )
         send_msg(vk, uid, help_text)
         return
     if norm == "/ping":
-        send_msg(vk, uid, "pong")
+        send_msg(vk, uid, "🏓 pong! Я жив и готов помочь!")
         return
 
     if admin:
@@ -897,17 +906,17 @@ def handle_private(vk, community_owner_id, group_id, admin_ids, event):
         elif norm.startswith("!сравни"):
             handle_compare_command(vk, uid, msg, admin)
         else:
-            send_msg(vk, uid, "Неизвестная команда")
+            send_msg(vk, uid, "❓ Неизвестная команда. Попробуй:\n• `!собери пк за 50000`\n• `@ вопрос`")
         return
 
     if not is_subscribed(vk, group_id, uid):
-        send_msg(vk, uid, f"❌ Подпишитесь на сообщество: https://vk.com/club{group_id}")
+        send_msg(vk, uid, f"📢 Чтобы я мог помогать, подпишись на сообщество: https://vk.com/club{group_id}\nСпасибо! 😊")
         return
 
     if not try_consume_usage(uid):
         if not is_exhaustion_notified(uid):
             set_exhaustion_notified(uid, True)
-            send_msg(vk, uid, "⛔ Лимит 2 запроса. Получите бонусы: репост (+2), 10 лайков (+1). Повторите команду после действий.")
+            send_msg(vk, uid, "😔 Лимит 2 запроса на сегодня исчерпан. Но ты можешь получить ещё:\n• Сделай репост закреплённого поста → +2 запроса\n• Поставь 10 лайков под постами → +1 запрос\nПосле действий повтори команду – я начислю бонусы автоматически!")
             return
         else:
             repost_bonus, likes_bonus, repost_done, likes_count = get_user_bonuses(vk, community_owner_id, uid, force_refresh=True)
@@ -915,14 +924,14 @@ def handle_private(vk, community_owner_id, group_id, admin_ids, event):
             if try_consume_usage(uid):
                 set_exhaustion_notified(uid, False)
             else:
-                msg_text = f"⛔ Лимит {total}. Репост: {'✅' if repost_done else '❌'}, лайки: {likes_count}/10"
+                msg_text = f"⛔ Лимит {total} запросов. Репост: {'✅' if repost_done else '❌'}, лайки: {likes_count}/10"
                 send_msg(vk, uid, msg_text)
                 return
 
     if norm.startswith("!собери пк"):
         handle_build_command(vk, uid, msg, admin)
     else:
-        send_msg(vk, uid, "❓ Неизвестно. Используйте !собери пк или @")
+        send_msg(vk, uid, "❓ Неизвестная команда. Я понимаю только:\n• `!собери пк за 50000`\n• `@ текст вопроса`\nПопробуй ещё раз!")
 
 def handle_comment(vk, community_owner_id, event):
     text = (event.object.get("text") or "").strip()
@@ -936,7 +945,7 @@ def handle_comment(vk, community_owner_id, event):
         reply_comment(vk, event.object.get("owner_id"), event.object.get("post_id"), event.object.get("id"), f"@id{from_id}, {msg}")
         return
     update_comment_spam(from_id)
-    reply_text = f"@id{from_id}, привет! Для подбора ПК напишите в ЛС: https://vk.com/im?sel={community_owner_id} команду !собери пк за 50000"
+    reply_text = f"@id{from_id}, привет! 👋\n\n🔧 Для подбора ПК напиши мне в личные сообщения:\n👉 https://vk.com/im?sel={community_owner_id}\nКоманда: `!собери пк за 50000`\n\nБуду рад помочь! 🚀"
     reply_comment(vk, event.object.get("owner_id"), event.object.get("post_id"), event.object.get("id"), reply_text)
 
 # ------------------------------
